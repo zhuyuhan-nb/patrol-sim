@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref,onMounted, onUnmounted } from 'vue'
+import { reactive, ref, onMounted, onUnmounted } from 'vue'
 
 const cellSize = 36
 
@@ -155,6 +155,110 @@ onUnmounted(() => {
   disposed = true
   clearInterval(timer)
 })
+const patrolPoints = [[4, 8], [12, 3], [14, 10]]
+const patrolStatus = ref('idle')
+const patrolMessage = ref('')
+const patrolProgress = ref({ active: false, total: 3, current: 0, done: false })
+let patrolTimer = null
+let patrolStartedAt = 0
+
+function mockGetPatrolProgress() {
+  const total = patrolProgress.value.total
+  const current = Math.min(total, Math.floor((Date.now() - patrolStartedAt) / 2000))
+  const done = current === total
+
+  return { active: !done, total, current, done }
+}
+
+function stopPatrolPolling() {
+  clearInterval(patrolTimer)
+  patrolTimer = null
+}
+
+function startPatrolPolling(total) {
+  stopPatrolPolling()
+  patrolProgress.value = { active: true, total, current: 0, done: false }
+
+  let pending = false
+
+  const timer = setInterval(async () => {
+    if (pending) return
+    pending = true
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/patrol/progress')
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+      const progress = await response.json()
+      if (patrolTimer !== timer) return
+
+      patrolProgress.value = progress
+
+      if (!progress.active) {
+        patrolStatus.value = 'idle'
+        stopPatrolPolling()
+      }
+    } catch (error) {
+      console.error('读取巡检进度失败', error)
+    } finally {
+      pending = false
+    }
+  }, 500)
+
+  patrolTimer = timer
+}
+
+onUnmounted(stopPatrolPolling)
+async function startPatrol() {
+  patrolMessage.value = ''
+
+  try {
+    const response = await fetch('http://127.0.0.1:8000/api/patrol/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ points: patrolPoints }),
+    })
+    const data = await response.json()
+
+    if (!response.ok) {
+      patrolMessage.value = data.error?.message ?? `启动失败（HTTP ${response.status}）`
+      return
+    }
+
+    patrolStatus.value = data.status
+    startPatrolPolling(data.total)
+  } catch (error) {
+    console.error('启动巡检失败', error)
+    patrolMessage.value = '启动巡检失败，请检查后端是否已启动'
+  }
+}
+async function stopPatrol() {
+  patrolMessage.value = ''
+
+  try {
+    const response = await fetch('http://127.0.0.1:8000/api/patrol/stop', {
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      patrolMessage.value =
+        data.error?.message ?? `停止失败（HTTP ${response.status}）`
+      return
+    }
+
+    stopPatrolPolling()
+    patrolStatus.value = 'idle'
+    patrolProgress.value = {
+      ...patrolProgress.value,
+      active: false,
+      done: false,
+    }
+  } catch (error) {
+    console.error('停止巡检失败', error)
+    patrolMessage.value = '停止巡检失败，请检查后端连接'
+  }
+}
 onUnmounted(() => clearInterval(sensorTimer))
 </script>
 
@@ -222,10 +326,10 @@ onUnmounted(() => clearInterval(sensorTimer))
 </text>
 
     </svg>
-   <button :disabled="control.busy" @click="turnLeft">左转</button>
-<button :disabled="control.busy" @click="moveForward">前进</button>
-<button :disabled="control.busy" @click="moveBack">后退</button>
-<button :disabled="control.busy" @click="turnRight">右转</button>
+   <button :disabled="control.busy || patrolStatus === 'patrolling' || robot.status === 'patrolling'" @click="turnLeft">左转</button>
+<button :disabled="control.busy || patrolStatus === 'patrolling' || robot.status === 'patrolling'" @click="moveForward">前进</button>
+<button :disabled="control.busy || patrolStatus === 'patrolling' || robot.status === 'patrolling'"@click="moveBack">后退</button>
+<button :disabled="control.busy || patrolStatus === 'patrolling' || robot.status === 'patrolling'"@click="turnRight">右转</button>
 
 <p role="status">{{ control.message }}</p>
     <p>
@@ -233,6 +337,33 @@ onUnmounted(() => clearInterval(sensorTimer))
       · 朝向：{{ robot.heading }}°
       · 状态：{{ robot.status }}
     </p>
+    <section>
+  <h2>自动巡检</h2>
+  <p>巡检点：(4,8) → (12,3) → (14,10)</p>
+
+  <button type="button" @click="startPatrol">开始巡检</button>
+<p>状态：{{ patrolStatus === 'patrolling' ? '巡检中' : '空闲' }}</p>
+<p v-if="patrolMessage" role="alert">{{ patrolMessage }}</p>
+  <button
+  type="button"
+  :disabled="patrolStatus !== 'patrolling'"
+  @click="stopPatrol"
+>
+  停止巡检
+</button>
+
+ <p>
+  <label for="patrol-progress">
+    巡检进度：{{ patrolProgress.current }} / {{ patrolProgress.total }}
+  </label>
+  <progress
+    id="patrol-progress"
+    :value="patrolProgress.current"
+    :max="patrolProgress.total"
+  />
+  <span v-if="patrolProgress.done">巡检完成</span>
+</p>
+</section>
     <div class="sensor-box">
   <p>前方传感器</p >
   <p>blocked：{{ sensorBlocked }}</p >
